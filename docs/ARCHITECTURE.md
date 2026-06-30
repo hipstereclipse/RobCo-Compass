@@ -123,20 +123,19 @@ convention is in one place.
 ## 4. Theme & colour
 
 A RobCo terminal is **one hue at several brightness levels on near-black** —
-never two hues on screen at once. That rule is enforced structurally
-([source](../src/COMPASS.JS#L54-L67)):
+never two hues on screen at once. On this device colour is **indexed, not RGB**:
+`setColor(0..3)` selects a palette level (`BG=0 · DIM=1 · MID=2 · FG=3`). You
+never call `setColor` directly — you call `col(level)` with one of those four
+indices.
 
-```js
-var THEMES = { green: [0.10, 1.00, 0.50],   // Fallout 3  ~ #1AFF80
-               amber: [1.00, 0.71, 0.26] }; // New Vegas  ~ #FFB642
-var LEVEL  = [0.0, 0.30, 0.62, 1.0];        // 0 bg · 1 dim · 2 mid · 3 bright
-```
-
-You never call `setColor` directly. You call `col(level)` with `0..3`, which
-multiplies the active theme hue by the level's brightness. On a 2-bit buffer the
-result snaps to the nearest palette entry; on a true-colour `g` it renders the
-real colour. Switching the whole UI between green and amber is therefore a single
-`cfg.theme` flip.
+This matters: passing RGB floats to `setColor` is a bug on the Pip-Boy 3000.
+Low-flash Espruino builds treat `setColor(r,g,b)` as "`r` = integer colour, `g`/`b`
+ignored", so a fractional DIM/MID level truncates to `0` = black and the text goes
+**invisible**. The app therefore draws everything indexed, and installs a small
+`setColor` shim (`installRenderCompat`) that maps the four indices to the user's
+live Pip-Boy theme colour via `h.toColor()` while the app is resident, restoring
+the original on exit. `applyTheme()` reads the configured HUD hue (green or amber)
+and feeds the shim, so switching the whole UI is a single `cfg.theme` flip.
 
 | Green (`#1AFF80`) | Amber (`#FFB642`) |
 |---|---|
@@ -284,10 +283,13 @@ State `screen` is one of `SCR.HOME | SCR.CAL | SCR.MORSE`
 ([source](../src/COMPASS.JS#L434-L435)). `draw()` is a three-way dispatcher
 ([source](../src/COMPASS.JS#L625-L630)); each branch fully repaints.
 
-Shared chrome lives in small helpers — `frame()` (background + border),
-`header(title)` (the `ROBCO INDUSTRIES (TM) TERMLINK` banner + a right-aligned
-screen title), and `footer(text)` (the live key-binding legend at the bottom of
-every screen).
+Shared chrome lives in small helpers — `header(title)` (clears the screen, draws
+the `ROBCO TERMLINK` brand left + a right-aligned screen title, and the dim corner
+brackets that trace the rounded bezel) and `footer(text)` (the live key-binding
+legend, drawn in the small font so it clears the rounded bottom corners). All
+content is kept inside the round-safe box (`SAFE_L/T/R/B`, `CONTENT_*`, `TEXT_*`)
+because the Pip-Boy glass clips its corners — nothing is drawn where the arc would
+hide it.
 
 - **`drawHome()`** ([source](../src/COMPASS.JS#L517-L547)) draws the rotating rose
   via `compassDisc(cx, cy, r, heading)` — ticks every 10° (major every 30°),

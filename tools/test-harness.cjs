@@ -17,13 +17,21 @@ var src = realFs.readFileSync(SRC, "utf8");
 
 function makeG(frame) {
   var noop = function () {};
-  return {
+  // Mock the Espruino Graphics subset the app uses. setColor takes an integer
+  // palette index (0..3); toColor packs a tint level (the app's render-compat
+  // wrapper calls it). Both are no-ops here beyond returning self for chaining.
+  var G = {
     getWidth: function () { return 480; }, getHeight: function () { return 320; },
-    setColor: noop, setFont: noop, setFontVector: noop, setFontAlign: noop,
-    drawString: function (s) { frame.push("" + s); }, drawLine: noop, drawRect: noop,
-    fillRect: noop, drawCircle: noop, reset: noop, clear: noop, flip: noop,
+    setColor: function () { return G; }, setFont: function () { return G; },
+    setFontVector: function () { return G; }, setFontAlign: function () { return G; },
+    toColor: function () { return 0; },
+    drawString: function (s) { frame.push("" + s); return G; },
+    drawLine: function () { return G; }, drawRect: function () { return G; },
+    fillRect: function () { return G; }, drawCircle: function () { return G; },
+    reset: function () { return G; }, clear: function () { return G; }, flip: noop,
     stringWidth: function (s) { return ("" + s).length * 9; }
   };
+  return G;
 }
 
 /* ---- full UI flow (accel-only confirmed hardware) ---- */
@@ -61,15 +69,18 @@ function flowTest() {
     var factory = eval(src);
     assert(typeof factory === "function", "not a function expression");
     app = factory();
-    assert(app && app.id === "COMPASS", "app.id");
+    assert(app && app.id === "RobCo Compass", "app.id");
     assert(app.notDefault === true && app.fullscreen === true, "flags");
     assert(typeof app.remove === "function", "remove()");
     assert(handlers.knob1 && handlers.knob2 && handlers.torch, "listeners");
-    assert(!handlers.accel, "accel off by default (motion assist opt-in)");
+    // Accel.init() binds the accel stream at startup (used for tilt-compensated
+    // magnetic heading and the optional turn-gesture nudge). It must be detached
+    // by remove(); see the dedicated teardown test below.
+    assert(!!handlers.accel, "accel stream bound at start");
   });
   step("HOME shows honest MANUAL mode + 3 buttons", function () {
     scr = act(function () {});
-    assert(/ROBCO NAVIGATION/.test(scr), "header");
+    assert(/NAVIGATION/.test(scr) && /ROBCO TERMLINK/.test(scr), "header");
     assert(/MODE: MANUAL BEARING/.test(scr), "honest mode");
     assert(/COMPASS/.test(scr) && /CALIBRATE/.test(scr) && /MORSE/.test(scr), "buttons");
   });
@@ -80,12 +91,12 @@ function flowTest() {
     assert(/CALIBRATION/.test(scr) && /BEARING/.test(scr) && /ACTION/.test(scr), "cal screen");
   });
   step("lat/lon -> numeric solar azimuth", function () {
-    // CAL_FIELDS = BEARING, TRIM, LAT, LON, UTC, ACTION; K2 advances the field.
-    act(function () { handlers.knob2(1); }); act(function () { handlers.knob2(1); }); // -> LAT
+    // CAL_FIELDS = METHOD, BEARING, TRIM, DECL, LAT, LON, UTC, ACTION; K2 advances.
+    for (var m = 0; m < 4; m++) act(function () { handlers.knob2(1); }); // METHOD -> LAT
     for (var k = 0; k < 6; k++) act(function () { handlers.knob1(1); }); // bump LAT
     act(function () { handlers.knob2(1); }); // -> LON
     for (var j = 0; j < 6; j++) scr = act(function () { handlers.knob1(1); }); // bump LON
-    assert(/SUN:\s*\d/.test(scr), "azimuth numeric");
+    assert(/SUN AZIMUTH:\s*\d/.test(scr), "azimuth numeric");
   });
   step("CAPTURE SUN persists", function () {
     saved = null;
@@ -96,13 +107,13 @@ function flowTest() {
     var c = JSON.parse(saved);
     assert(c.locSet === true && typeof c.bearing === "number", "cfg saved");
   });
-  step("torch returns HOME", function () { assert(/ROBCO NAVIGATION/.test(act(function () { handlers.torch(); })), "home"); });
+  step("torch returns HOME", function () { assert(/NAVIGATION/.test(act(function () { handlers.torch(); })), "home"); });
   step("open MORSE + compose 'E'", function () {
     // homeFocus is still on CALIBRATE (1) from the earlier visit; one more step reaches MORSE (2).
     act(function () { handlers.knob1(1); });
     scr = act(function () { handlers.knob1(0); });
-    assert(/MORSE TX/.test(scr), "morse");
-    for (var k = 0; k < 4; k++) act(function () { handlers.knob2(1); });
+    assert(/MORSE/.test(scr), "morse");
+    for (var k = 0; k < 4; k++) act(function () { handlers.knob2(1); }); // A -> E
     scr = act(function () { handlers.knob1(0); });
     assert(/MSG:\s*E/.test(scr), "composed E");
   });
@@ -119,7 +130,8 @@ function flowTest() {
     app.remove();
     assert(Object.keys(intervals).length === 0, "ticker");
     assert(Object.keys(timeouts).length === 0, "timers");
-    assert(!handlers.knob1 && !handlers.knob2 && !handlers.torch, "listeners");
+    assert(!handlers.knob1 && !handlers.knob2 && !handlers.torch, "knob/torch listeners");
+    assert(!handlers.accel, "accel detached");
     assert(ledState === 0, "torch off");
     assert(saved !== null, "flushed");
   });
@@ -128,14 +140,17 @@ function flowTest() {
   return fails;
 }
 
-/* ---- motion-assist opt-in: accel listener binds only once toggled on ---- */
-function motionAssistTest() {
+/* ---- accel lifecycle: the accel stream is bound at start (tilt-compensated
+ * magnetic heading + optional gesture) and detached cleanly by remove(). ---- */
+function accelLifecycleTest() {
   var handlers = {}, intervals = {}, timeouts = {}, tid = 1, frame = [];
-  var h = makeG(frame), g = h, bC;
+  var h = makeG(frame), g = h;
   var digitalWrite = function () {}; var LED_GREEN = {}; var E = { openFile: function () { return null; } };
+  var accelOn = false;
   var Pip = {
     on: function (e, f) { handlers[e] = f; }, removeListener: function (e, f) { if (handlers[e] === f) delete handlers[e]; },
-    removeAllListeners: function (e) { delete handlers[e]; }, audioBuiltin: function () {}
+    removeAllListeners: function (e) { delete handlers[e]; }, audioBuiltin: function () {},
+    accelOn: function () { accelOn = true; }, accelOff: function () { accelOn = false; }
   };
   var require = function (m) { if (m === "fs") return { readFileSync: function () { throw new Error("x"); }, writeFileSync: function () {} }; throw new Error("x"); };
   var setInterval = function (f) { var id = tid++; intervals[id] = f; return id; };
@@ -143,20 +158,18 @@ function motionAssistTest() {
   var setTimeout = function (f) { var id = tid++; timeouts[id] = f; return id; };
   var clearTimeout = function (id) { delete timeouts[id]; };
   var app = eval(src)();
-  var pass = !handlers.accel;                       // off by default
-  handlers.knob1(1); handlers.knob1(0);             // HOME -> CALIBRATE
-  for (var i = 0; i < 5; i++) handlers.knob2(1);    // field -> ACTION
-  for (var j = 0; j < 3; j++) handlers.knob1(1);    // ACTION -> MOTION ASSIST
-  handlers.knob1(0);                                // activate: toggle on
-  pass = pass && !!handlers.accel;
+  var boundAtStart = !!handlers.accel && accelOn === true;
   app.remove();
-  console.log((pass ? "  PASS " : "  FAIL ") + "MOTION ASSIST toggle binds/unbinds accel");
+  var detachedAfter = !handlers.accel && accelOn === false;
+  var pass = boundAtStart && detachedAfter;
+  console.log((boundAtStart ? "  PASS " : "  FAIL ") + "accel stream bound at start");
+  console.log((detachedAfter ? "  PASS " : "  FAIL ") + "accel stream detached by remove()");
   return pass ? 0 : 1;
 }
 
 var fails = flowTest();
-console.log("\nMOTION ASSIST (opt-in accel):");
-fails += motionAssistTest();
+console.log("\nACCEL LIFECYCLE (bound at start, detached on remove):");
+fails += accelLifecycleTest();
 
 console.log("\n" + (fails ? "RESULT: " + fails + " FAILURE(S)" : "RESULT: ALL PASS"));
 process.exit(fails ? 1 : 0);

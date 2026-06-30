@@ -1,7 +1,7 @@
 {
   "id": "robco-compass",
-  "name": "Compass",
-  "version": "1.00",
+  "name": "RobCo Compass",
+  "version": "1.01",
   "type": "app",
   "category": "MISC",
   "description": "RobCo Navigation - circular digital compass with solar calibration and a Morse screen/torch transmitter.",
