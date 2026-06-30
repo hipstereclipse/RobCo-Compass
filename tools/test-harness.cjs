@@ -65,7 +65,7 @@ function flowTest() {
     assert(app.notDefault === true && app.fullscreen === true, "flags");
     assert(typeof app.remove === "function", "remove()");
     assert(handlers.knob1 && handlers.knob2 && handlers.torch, "listeners");
-    assert(handlers.accel, "accel probe");
+    assert(!handlers.accel, "accel off by default (motion assist opt-in)");
   });
   step("HOME shows honest MANUAL mode + 3 buttons", function () {
     scr = act(function () {});
@@ -73,36 +73,35 @@ function flowTest() {
     assert(/MODE: MANUAL BEARING/.test(scr), "honest mode");
     assert(/COMPASS/.test(scr) && /CALIBRATE/.test(scr) && /MORSE/.test(scr), "buttons");
   });
-  step("accel sample accepted", function () { handlers.accel({ x: 0, y: 0, z: 1 }); });
   step("K2 nudges bearing", function () { assert(act(function () {}) !== act(function () { handlers.knob2(1); }), "redrew"); });
   step("open CALIBRATE", function () {
     act(function () { handlers.knob1(1); });
     scr = act(function () { handlers.knob1(0); });
-    assert(/CALIBRATION/.test(scr) && /METHOD/.test(scr) && /ACTION/.test(scr), "cal screen");
+    assert(/CALIBRATION/.test(scr) && /BEARING/.test(scr) && /ACTION/.test(scr), "cal screen");
   });
   step("lat/lon -> numeric solar azimuth", function () {
-    for (var k = 0; k < 4; k++) act(function () { handlers.knob2(1); });
-    act(function () { handlers.knob1(1); });
-    act(function () { handlers.knob1(1); });
-    act(function () { handlers.knob2(1); });
-    scr = act(function () { handlers.knob1(1); });
-    assert(/SUN AZIMUTH:\s*\d/.test(scr), "azimuth numeric");
+    // CAL_FIELDS = BEARING, TRIM, LAT, LON, UTC, ACTION; K2 advances the field.
+    act(function () { handlers.knob2(1); }); act(function () { handlers.knob2(1); }); // -> LAT
+    for (var k = 0; k < 6; k++) act(function () { handlers.knob1(1); }); // bump LAT
+    act(function () { handlers.knob2(1); }); // -> LON
+    for (var j = 0; j < 6; j++) scr = act(function () { handlers.knob1(1); }); // bump LON
+    assert(/SUN:\s*\d/.test(scr), "azimuth numeric");
   });
   step("CAPTURE SUN persists", function () {
     saved = null;
-    act(function () { handlers.knob2(1); });
-    act(function () { handlers.knob2(1); });
-    act(function () { handlers.knob1(1); });
-    act(function () { handlers.knob1(0); });
+    act(function () { handlers.knob2(1); }); act(function () { handlers.knob2(1); }); // LON -> UTC -> ACTION
+    act(function () { handlers.knob1(1); }); // ACTION: APPLY -> CAPTURE SUN
+    act(function () { handlers.knob1(0); }); // activate
     assert(saved !== null, "flushed");
     var c = JSON.parse(saved);
     assert(c.locSet === true && typeof c.bearing === "number", "cfg saved");
   });
   step("torch returns HOME", function () { assert(/ROBCO NAVIGATION/.test(act(function () { handlers.torch(); })), "home"); });
   step("open MORSE + compose 'E'", function () {
+    // homeFocus is still on CALIBRATE (1) from the earlier visit; one more step reaches MORSE (2).
     act(function () { handlers.knob1(1); });
     scr = act(function () { handlers.knob1(0); });
-    assert(/MORSE TRANSMITTER/.test(scr), "morse");
+    assert(/MORSE TX/.test(scr), "morse");
     for (var k = 0; k < 4; k++) act(function () { handlers.knob2(1); });
     scr = act(function () { handlers.knob1(0); });
     assert(/MSG:\s*E/.test(scr), "composed E");
@@ -129,34 +128,35 @@ function flowTest() {
   return fails;
 }
 
-/* ---- sensor-upgrade branches ---- */
-function modeTest(label, sensors, expect) {
+/* ---- motion-assist opt-in: accel listener binds only once toggled on ---- */
+function motionAssistTest() {
   var handlers = {}, intervals = {}, timeouts = {}, tid = 1, frame = [];
   var h = makeG(frame), g = h, bC;
   var digitalWrite = function () {}; var LED_GREEN = {}; var E = { openFile: function () { return null; } };
-  var Pip = Object.assign({
+  var Pip = {
     on: function (e, f) { handlers[e] = f; }, removeListener: function (e, f) { if (handlers[e] === f) delete handlers[e]; },
     removeAllListeners: function (e) { delete handlers[e]; }, audioBuiltin: function () {}
-  }, sensors);
+  };
   var require = function (m) { if (m === "fs") return { readFileSync: function () { throw new Error("x"); }, writeFileSync: function () {} }; throw new Error("x"); };
   var setInterval = function (f) { var id = tid++; intervals[id] = f; return id; };
   var clearInterval = function (id) { delete intervals[id]; };
   var setTimeout = function (f) { var id = tid++; timeouts[id] = f; return id; };
   var clearTimeout = function (id) { delete timeouts[id]; };
   var app = eval(src)();
-  frame.length = 0; intervals[Object.keys(intervals)[0]]();
-  var got = (frame.join(" | ").match(/MODE: [A-Z\- ]+/) || ["(none)"])[0].trim();
+  var pass = !handlers.accel;                       // off by default
+  handlers.knob1(1); handlers.knob1(0);             // HOME -> CALIBRATE
+  for (var i = 0; i < 5; i++) handlers.knob2(1);    // field -> ACTION
+  for (var j = 0; j < 3; j++) handlers.knob1(1);    // ACTION -> MOTION ASSIST
+  handlers.knob1(0);                                // activate: toggle on
+  pass = pass && !!handlers.accel;
   app.remove();
-  var pass = got.indexOf(expect) >= 0;
-  console.log((pass ? "  PASS " : "  FAIL ") + label + '  -> "' + got + '"');
+  console.log((pass ? "  PASS " : "  FAIL ") + "MOTION ASSIST toggle binds/unbinds accel");
   return pass ? 0 : 1;
 }
 
 var fails = flowTest();
-console.log("\nHEADING PROVIDER (degrade/upgrade):");
-fails += modeTest("accel-only (confirmed hw)", {}, "MANUAL BEARING");
-fails += modeTest("magnetometer present", { magRd: function () { return { x: 0.3, y: -0.2, z: 0.4 }; } }, "MAGNETIC");
-fails += modeTest("gyroscope present", { gyroRd: function () { return { x: 0, y: 0, z: 1.5 }; } }, "DEAD-RECKONING");
+console.log("\nMOTION ASSIST (opt-in accel):");
+fails += motionAssistTest();
 
 console.log("\n" + (fails ? "RESULT: " + fails + " FAILURE(S)" : "RESULT: ALL PASS"));
 process.exit(fails ? 1 : 0);
