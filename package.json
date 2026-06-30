@@ -1,0 +1,15 @@
+{
+  "name": "robco-compass",
+  "version": "1.0.0",
+  "private": true,
+  "description": "RobCo Navigation - a circular digital compass app for The Wand Company Pip-Boy 3000 (Espruino).",
+  "scripts": {
+    "build": "node tools/build.js",
+    "icon": "node tools/make-icon.js",
+    "shots": "node tools/render-screens.cjs",
+    "test": "node tools/test-harness.cjs"
+  },
+  "devDependencies": {
+    "terser": "^5.31.0"
+  }
+}
